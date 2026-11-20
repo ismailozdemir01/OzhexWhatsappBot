@@ -27,6 +27,8 @@ def test_consent_gated_group_activity_and_revocation(monkeypatch):
     event = {"device_key": device["device_key"], "event_type": "foreground",
              "occurred_at": datetime.now(timezone.utc).isoformat()}
     assert client.post("/api/v1/activity", headers=owner, json=event).status_code == 200
+    assert client.put("/api/v1/consent", headers=owner,
+                      json={"activity_sharing": False, "version": "1.0"}).status_code == 200
 
     group = client.post("/api/v1/groups?name=Family", headers=owner)
     assert group.status_code == 200
