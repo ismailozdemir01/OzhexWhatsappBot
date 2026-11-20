@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     cors_origins: str = "http://127.0.0.1:8000"
     class Config: env_file = ".env"
 cfg = Settings()
+if cfg.app_env.lower() == "production" and cfg.jwt_secret == "development-secret-change-before-deploy":
+    raise RuntimeError("Set a unique JWT_SECRET before production startup.")
 engine = create_engine(cfg.database_url, connect_args={"check_same_thread":False} if cfg.database_url.startswith("sqlite") else {}, pool_pre_ping=True)
 SessionLocal = sessionmaker(engine, autoflush=False, expire_on_commit=False)
 class Base(DeclarativeBase): pass
@@ -79,7 +81,7 @@ class GroupMember(Base):
     joined_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
     __table_args__=(UniqueConstraint("group_id","user_id"),)
 Base.metadata.create_all(engine)
-pwd=CryptContext(schemes=["bcrypt"],deprecated="auto")
+pwd=CryptContext(schemes=["pbkdf2_sha256"],deprecated="auto")
 bearer=HTTPBearer(auto_error=False)
 app=FastAPI(title="Ozhex WhatsApp Platform",version="0.1.0")
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in cfg.cors_origins.split(",") if x.strip()],allow_methods=["GET","POST","PUT"],allow_headers=["Authorization","Content-Type","X-Bootstrap-Token","X-Hub-Signature-256"])
