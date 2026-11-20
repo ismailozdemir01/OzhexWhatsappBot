@@ -1,4 +1,4 @@
-import hashlib, hmac, json
+import hashlib, hmac, json, secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import jwt
@@ -9,7 +9,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field
 from pydantic_settings import BaseSettings
 from passlib.context import CryptContext
-from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, ForeignKey, JSON, select, desc
+from sqlalchemy import create_engine, String, Integer, Boolean, DateTime, ForeignKey, JSON, select, desc, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 class Settings(BaseSettings):
@@ -64,6 +64,20 @@ class BusinessEvent(Base):
     contact_wa_id: Mapped[str|None]=mapped_column(String(64),nullable=True)
     payload: Mapped[dict]=mapped_column(JSON)
     occurred_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class ShareGroup(Base):
+    __tablename__="share_groups"
+    id: Mapped[int]=mapped_column(Integer,primary_key=True)
+    name: Mapped[str]=mapped_column(String(80))
+    owner_id: Mapped[int]=mapped_column(ForeignKey("users.id"),index=True)
+    invite_code: Mapped[str]=mapped_column(String(32),unique=True,index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class GroupMember(Base):
+    __tablename__="group_members"
+    id: Mapped[int]=mapped_column(Integer,primary_key=True)
+    group_id: Mapped[int]=mapped_column(ForeignKey("share_groups.id"),index=True)
+    user_id: Mapped[int]=mapped_column(ForeignKey("users.id"),index=True)
+    joined_at: Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __table_args__=(UniqueConstraint("group_id","user_id"),)
 Base.metadata.create_all(engine)
 pwd=CryptContext(schemes=["bcrypt"],deprecated="auto")
 bearer=HTTPBearer(auto_error=False)
@@ -152,6 +166,30 @@ def ingest(data:ActivityInput,user:User=Depends(auth_user),db:Session=Depends(ge
 def activity(limit:int=100,user:User=Depends(auth_user),db:Session=Depends(get_db)):
     rows=db.scalars(select(Activity).where(Activity.user_id==user.id).order_by(desc(Activity.occurred_at)).limit(min(max(limit,1),500))).all()
     return [{"event_type":x.event_type,"occurred_at":x.occurred_at.isoformat(),"source":x.source} for x in rows]
+@app.post("/api/v1/groups")
+def create_group(name:str,user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    if not 1 <= len(name.strip()) <= 80: raise HTTPException(422,"Group name must be 1-80 characters")
+    code=secrets.token_urlsafe(12)
+    group=ShareGroup(name=name.strip(),owner_id=user.id,invite_code=code)
+    db.add(group);db.flush();db.add(GroupMember(group_id=group.id,user_id=user.id));db.commit()
+    return {"id":group.id,"name":group.name,"invite_code":group.invite_code}
+@app.post("/api/v1/groups/join")
+def join_group(invite_code:str,user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    group=db.scalar(select(ShareGroup).where(ShareGroup.invite_code==invite_code))
+    if not group: raise HTTPException(404,"Invalid group invitation")
+    member=db.scalar(select(GroupMember).where(GroupMember.group_id==group.id,GroupMember.user_id==user.id))
+    if not member: db.add(GroupMember(group_id=group.id,user_id=user.id));db.commit()
+    return {"id":group.id,"name":group.name,"membership":"active"}
+@app.get("/api/v1/groups")
+def list_groups(user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    rows=db.scalars(select(ShareGroup).join(GroupMember,GroupMember.group_id==ShareGroup.id).where(GroupMember.user_id==user.id)).all()
+    return [{"id":g.id,"name":g.name,"is_owner":g.owner_id==user.id} for g in rows]
+@app.get("/api/v1/groups/{group_id}/activity")
+def group_activity(group_id:int,limit:int=100,user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    member=db.scalar(select(GroupMember.id).where(GroupMember.group_id==group_id,GroupMember.user_id==user.id))
+    if member is None: raise HTTPException(403,"Group membership required")
+    rows=db.execute(select(Activity,User,Device).join(User,User.id==Activity.user_id).join(Device,Device.id==Activity.device_id).join(GroupMember,GroupMember.user_id==Activity.user_id).join(Consent,Consent.user_id==Activity.user_id).where(GroupMember.group_id==group_id,Consent.activity_sharing.is_(True),Device.enabled.is_(True)).order_by(desc(Activity.occurred_at)).limit(min(max(limit,1),500))).all()
+    return [{"member":u.email,"event_type":a.event_type,"occurred_at":a.occurred_at.isoformat(),"platform":d.platform} for a,u,d in rows]
 @app.get("/api/v1/business/events")
 def business_events(limit:int=100,user:User=Depends(auth_user),db:Session=Depends(get_db)):
     if not user.is_admin: raise HTTPException(403,"Administrator access required")
