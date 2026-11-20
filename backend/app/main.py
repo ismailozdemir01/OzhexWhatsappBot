@@ -197,6 +197,8 @@ def list_groups(user:User=Depends(auth_user),db:Session=Depends(get_db)):
 def group_activity(group_id:int,limit:int=100,user:User=Depends(auth_user),db:Session=Depends(get_db)):
     member=db.scalar(select(GroupMember.id).where(GroupMember.group_id==group_id,GroupMember.user_id==user.id))
     if member is None: raise HTTPException(403,"Group membership required")
+    viewer_consent=db.scalar(select(Consent).where(Consent.user_id==user.id))
+    if viewer_consent is None or not viewer_consent.activity_sharing: raise HTTPException(403,"Reciprocal activity-sharing consent is required")
     rows=db.execute(select(Activity,User,Device).join(User,User.id==Activity.user_id).join(Device,Device.id==Activity.device_id).join(GroupMember,GroupMember.user_id==Activity.user_id).join(Consent,Consent.user_id==Activity.user_id).where(GroupMember.group_id==group_id,Consent.activity_sharing.is_(True),Device.enabled.is_(True)).order_by(desc(Activity.occurred_at)).limit(min(max(limit,1),500))).all()
     return [{"member":u.email,"event_type":a.event_type,"occurred_at":a.occurred_at.isoformat(),"platform":d.platform} for a,u,d in rows]
 @app.post("/api/v1/business/messages")
