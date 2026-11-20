@@ -45,7 +45,10 @@ def test_consent_gated_group_activity_and_revocation(monkeypatch):
     member = {"Authorization": f"Bearer {login.json()['access_token']}"}
     assert client.post("/api/v1/groups/join", headers=member, params={"invite_code": invite_code}).status_code == 200
 
-    # Membership alone does not expose events while the event owner's consent is disabled.
+    # A group member must also opt in before viewing reciprocal activity.
+    assert client.get(f"/api/v1/groups/{group.json()['id']}/activity", headers=member).status_code == 403
+    assert client.put("/api/v1/consent", headers=member,
+                      json={"activity_sharing": True, "version": "1.0"}).status_code == 200
     assert client.get(f"/api/v1/groups/{group.json()['id']}/activity", headers=member).json() == []
     assert client.put("/api/v1/consent", headers=owner,
                       json={"activity_sharing": True, "version": "1.0"}).status_code == 200
