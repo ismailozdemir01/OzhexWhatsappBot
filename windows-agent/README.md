@@ -11,4 +11,4 @@ $env:OZHEX_ACCESS_TOKEN="<your-access-token>"
 python agent.py
 ```
 
-The agent monitors the local WhatsApp Desktop process name only. If your package uses another executable name, set WHATSAPP_PROCESS_NAMES to a comma-separated list. It does not read messages, contacts, or browser sessions. Enable sharing in the Web dashboard before starting.
+The agent monitors the local WhatsApp Desktop process name only. Set WHATSAPP_PROCESS_NAMES if the executable name differs. It does not read messages or contacts. Enable sharing in the Web dashboard first.
