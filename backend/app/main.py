@@ -2,6 +2,7 @@ import hashlib, hmac, json, secrets
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import jwt
+import httpx
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -20,6 +21,9 @@ class Settings(BaseSettings):
     bootstrap_token: str = ""
     meta_verify_token: str = ""
     meta_app_secret: str = ""
+    meta_access_token: str = ""
+    meta_phone_number_id: str = ""
+    meta_graph_version: str = "v27.0"
     cors_origins: str = "http://127.0.0.1:8000"
     class Config: env_file = ".env"
 cfg = Settings()
@@ -113,6 +117,9 @@ class ActivityInput(BaseModel):
     device_key:str=Field(min_length=8,max_length=128)
     event_type:str=Field(pattern="^(foreground|background)$")
     occurred_at:datetime
+class SendTextInput(BaseModel):
+    to: str=Field(pattern="^\\+?[1-9][0-9]{7,14}$")
+    text: str=Field(min_length=1,max_length=4096)
 @app.get("/health")
 def health(): return {"status":"ok","service":"ozhex-whatsapp-platform"}
 @app.post("/api/v1/auth/bootstrap")
@@ -192,6 +199,35 @@ def group_activity(group_id:int,limit:int=100,user:User=Depends(auth_user),db:Se
     if member is None: raise HTTPException(403,"Group membership required")
     rows=db.execute(select(Activity,User,Device).join(User,User.id==Activity.user_id).join(Device,Device.id==Activity.device_id).join(GroupMember,GroupMember.user_id==Activity.user_id).join(Consent,Consent.user_id==Activity.user_id).where(GroupMember.group_id==group_id,Consent.activity_sharing.is_(True),Device.enabled.is_(True)).order_by(desc(Activity.occurred_at)).limit(min(max(limit,1),500))).all()
     return [{"member":u.email,"event_type":a.event_type,"occurred_at":a.occurred_at.isoformat(),"platform":d.platform} for a,u,d in rows]
+@app.post("/api/v1/business/messages")
+async def send_business_text(data:SendTextInput,user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    if not user.is_admin: raise HTTPException(403,"Administrator access required")
+    if not cfg.meta_access_token or not cfg.meta_phone_number_id: raise HTTPException(503,"Meta Cloud API credentials are not configured")
+    recipient=data.to.lstrip("+")
+    payload={"messaging_product":"whatsapp","recipient_type":"individual","to":recipient,"type":"text","text":{"preview_url":False,"body":data.text}}
+    url=f"https://graph.facebook.com/{cfg.meta_graph_version}/{cfg.meta_phone_number_id}/messages"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response=await client.post(url,headers={"Authorization":f"Bearer {cfg.meta_access_token}"},json=payload)
+    except httpx.RequestError:
+        raise HTTPException(502,"Meta Cloud API connection failed")
+    if response.is_error:
+        raise HTTPException(502,"Meta Cloud API rejected the message; check phone number, permissions, recipient and messaging window")
+    try: result=response.json()
+    except ValueError: raise HTTPException(502,"Meta Cloud API returned an invalid response")
+    messages=result.get("messages") or []
+    if not messages or not messages[0].get("id"): raise HTTPException(502,"Meta Cloud API response did not contain a message ID")
+    wamid=messages[0]["id"]
+    db.add(BusinessEvent(wamid=wamid,event_type="outbound_message",contact_wa_id=recipient,payload={"type":"text","text":data.text}))
+    db.commit()
+    return {"accepted":True,"wamid":wamid}
+@app.get("/api/v1/business/analytics")
+def business_analytics(user:User=Depends(auth_user),db:Session=Depends(get_db)):
+    if not user.is_admin: raise HTTPException(403,"Administrator access required")
+    rows=db.scalars(select(BusinessEvent)).all()
+    counts={}
+    for row in rows: counts[row.event_type]=counts.get(row.event_type,0)+1
+    return {"total_events":len(rows),"by_event_type":counts,"inbound_messages":counts.get("inbound_message",0),"outbound_messages":counts.get("outbound_message",0),"delivered":counts.get("status_delivered",0),"read":counts.get("status_read",0),"failed":counts.get("status_failed",0)}
 @app.get("/api/v1/business/events")
 def business_events(limit:int=100,user:User=Depends(auth_user),db:Session=Depends(get_db)):
     if not user.is_admin: raise HTTPException(403,"Administrator access required")
